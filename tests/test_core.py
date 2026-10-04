@@ -177,6 +177,28 @@ class CharacterStoreTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(CharacterStoreError):
             await store.put("alice", "未成年", {"ref": "person", "look": "long hair"})
 
+    async def test_lookup_falls_back_to_english_ref_and_tag(self):
+        plugin = FakeKVPlugin()
+        store = CharacterStore(plugin)
+        await store.put("alice", "兔耳娘", {
+            "ref": "the rabbit-eared woman",
+            "look": "adult woman, rabbit ears",
+            "tag": "rabbit-eared woman",
+        })
+        # 会话里的 LLM 常把 ref / tag 当卡名传进来，甚至漏掉冠词
+        self.assertEqual((await store.get("alice", "the rabbit-eared woman"))["name_zh"], "兔耳娘")
+        self.assertEqual((await store.get("alice", "rabbit-eared woman"))["name_zh"], "兔耳娘")
+        self.assertEqual((await store.get("alice", "RABBIT-EARED woman"))["name_zh"], "兔耳娘")
+        self.assertIsNone(await store.get("alice", "   "))
+        self.assertIsNone(await store.get("alice", "the fox-eared woman"))
+
+    async def test_configured_card_lookup_falls_back_to_ref(self):
+        plugin = FakeKVPlugin()
+        configured = {"Card": {"ref": "the configured woman", "look": "adult woman, configured hair"}}
+        store = CharacterStore(plugin, configured)
+        self.assertEqual((await store.get("alice", "the configured woman"))["ref"], "the configured woman")
+        self.assertEqual((await store.get("alice", "the configured woman"))["slot"], 1)
+
 
 class UsageStoreTests(unittest.IsolatedAsyncioTestCase):
     async def test_counts_are_per_user_and_per_day(self):

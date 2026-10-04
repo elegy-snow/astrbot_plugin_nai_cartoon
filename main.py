@@ -430,6 +430,16 @@ class NaiDoujinPlugin(Star):
     # 会话 LLM 工具：提示词由会话中的 LLM 细化，插件只管守卫、成本与队列
     # ------------------------------------------------------------------
 
+    async def _character_hint(self, user_id: str) -> str:
+        """工具找不到角色卡时给模型的纠错提示（一次就能自己改对）。"""
+        names = await self._character_store().list(user_id)
+        if not names:
+            return (
+                "当前没有任何角色卡。请改用 NAI_Generate_Image，把该角色的英文外貌标签直接写进 prompt；"
+                "或让用户用 /nai char new <名称> <JSON> 建立角色卡。"
+            )
+        return "可用角色卡：" + "、".join(names) + "（也可以直接传角色卡的英文称呼 ref）。"
+
     @_llm_tool()
     async def NAI_Generate_Image(
         self,
@@ -469,8 +479,10 @@ class NaiDoujinPlugin(Star):
 
         Args:
             prompt(string): 你细化好的英文提示词（标签行，或多格页的标签行 + 版式句 + Panel 描述）。
-            character(string): 可选。角色卡名；插件会把该卡的称呼与英文外貌追加到提示词末尾，
-                并把它容易被画错的部位加入负面。用 NAI_List_Characters 查询可用角色卡。
+            character(string): 可选。角色卡名——先调 NAI_List_Characters，把它返回的 name 字段原样传进来
+                （传角色卡的英文称呼 ref 也能命中）；插件会把该卡的称呼与英文外貌追加到提示词末尾，
+                并把它容易被画错的部位加入负面。用户没提角色卡、或卡库里没有这个角色时留空，
+                直接把英文外貌标签写进 prompt。
             size(string): 可选。竖图 / 横图 / 方图 / 2K竖图 / 2K横图 / 2K方图 / 4K竖图 / 4K横图 / 4K方图。
                 留空用插件设置的默认尺寸。2K/4K 分别约 15/25 点，是普通图的 15–25 倍，用户没明确
                 要求高清时不要用。
@@ -505,8 +517,7 @@ class NaiDoujinPlugin(Star):
         if card_name:
             card = await self._character_store().get(user_id, card_name)
             if card is None:
-                names = await self._character_store().list(user_id)
-                yield f"未找到角色卡：{card_name}；可用角色卡：" + ("、".join(names) if names else "（暂无）")
+                yield f"未找到角色卡：{card_name}。" + await self._character_hint(user_id)
                 return
             text, character_negative = merge_character(text, card)
         extra = ", ".join(part for part in (character_negative, normalize_tags(extra_negative)) if part)
@@ -581,7 +592,9 @@ class NaiDoujinPlugin(Star):
                   "sfx":"カランッ","moan":"んっ…","dialogue":true}]
                 action 必须是你细化过的英文画面描述；dialogue=true 表示这一格要一个空白气泡
                 （之后由人贴中文台词）。
-            character(string): 必填。角色卡名，用于取称呼与英文外貌；用 NAI_List_Characters 查询。
+            character(string): 必填。角色卡名——先调 NAI_List_Characters 取其 name 字段（英文称呼 ref 也能命中）。
+                卡库里没有这个角色时不要硬填：改用 NAI_Generate_Image 并把外貌写进 prompt，
+                或先让用户用 /nai char new 建卡。
             size(string): 可选。同 NAI_Generate_Image；留空用插件设置的默认尺寸。
             steps(number): 可选。1-50，留空或 0 用插件默认步数。
             style(string): 可选画风预设：fresh / comicDoujin / 2.5d / doujin / galgame / custom / none。
@@ -615,6 +628,13 @@ class NaiDoujinPlugin(Star):
             yield f"生成失败：{exc}"
             return
         user_id = str(event.get_sender_id())
+        card_name = str(character or "").strip()
+        if not card_name:
+            yield "参数错误：请指定 character（角色卡名）。" + await self._character_hint(user_id)
+            return
+        if await self._character_store().get(user_id, card_name) is None:
+            yield f"未找到角色卡：{card_name}。" + await self._character_hint(user_id)
+            return
         try:
             prompt, negative = await self._build_page(
                 user_id,
@@ -675,8 +695,10 @@ class NaiDoujinPlugin(Star):
         """列出当前可用的角色卡，供你挑选角色或核对英文外貌。
 
         用户提到某个角色、或需要把角色外貌写进提示词时先调用本工具。
-        返回 JSON：characters（名称/称呼 ref/外貌 look/易错特征 uc/部件）、layouts（可用版式）、
-        presets（可用画风预设）。
+        返回 JSON：characters（name 角色卡名 / ref 英文称呼 / look 英文外貌 / uc 易错特征 / parts 部件）、
+        layouts（可用版式）、presets（可用画风预设）。
+        调用 NAI_Generate_Image / NAI_Generate_Comic_Page 时，character 参数请传 characters[].name
+        （传 ref 也能命中）；characters 为空表示卡库为空，此时不要传 character 参数。
         """
         user_id = str(event.get_sender_id())
         store = self._character_store()

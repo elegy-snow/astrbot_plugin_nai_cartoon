@@ -345,7 +345,61 @@ class ToolFlowTests(unittest.IsolatedAsyncioTestCase):
         event = FakeEvent()
         results = await collect(plugin.NAI_Generate_Image(event, prompt="1girl", character="不存在"))
         self.assertIn("未找到角色卡", results[0])
+        self.assertIn("当前没有任何角色卡", results[0])
+        self.assertIn("NAI_Generate_Image", results[0])
         self.assertEqual(self.client.calls, [])
+
+    async def test_missing_character_hint_lists_existing_cards(self):
+        plugin = self.make_plugin()
+        await plugin._character_store().put(
+            "alice", "兔耳娘", {"ref": "the rabbit-eared woman", "look": "adult woman, rabbit ears"}
+        )
+        event = FakeEvent()
+        results = await collect(plugin.NAI_Generate_Image(event, prompt="1girl", character="角娘"))
+        self.assertIn("未找到角色卡：角娘", results[0])
+        self.assertIn("兔耳娘", results[0])
+        self.assertIn("ref", results[0])
+
+    async def test_character_card_can_be_selected_by_english_ref(self):
+        plugin = self.make_plugin()
+        await plugin._character_store().put(
+            "alice", "兔耳娘", {"ref": "the rabbit-eared woman", "look": "adult woman, rabbit ears"}
+        )
+        event = FakeEvent()
+        # 会话模型常把 ref 当成卡名传进来，必须照样命中
+        results = await collect(
+            plugin.NAI_Generate_Image(event, prompt="1girl, solo", character="the rabbit-eared woman")
+        )
+        self.assertIn("图片已生成并发送给用户", results[0])
+        self.assertIn("adult woman, rabbit ears", self.client.calls[0]["tag"])
+
+    async def test_page_tool_hints_when_character_is_missing_or_empty(self):
+        plugin = self.make_plugin()
+        event = FakeEvent()
+        no_card = await collect(
+            plugin.NAI_Generate_Comic_Page(
+                event,
+                layout="两格上下",
+                panels=json.dumps([{"no": 1, "action": "a"}, {"no": 2, "action": "b"}]),
+                character="rabbit-eared woman",
+            )
+        )
+        self.assertIn("未找到角色卡：rabbit-eared woman", no_card[0])
+        self.assertIn("NAI_Generate_Image", no_card[0])
+
+        await plugin._character_store().put(
+            "alice", "兔耳娘", {"ref": "the rabbit-eared woman", "look": "adult woman, rabbit ears"}
+        )
+        empty_name = await collect(
+            plugin.NAI_Generate_Comic_Page(
+                event,
+                layout="两格上下",
+                panels=json.dumps([{"no": 1, "action": "a"}, {"no": 2, "action": "b"}]),
+            )
+        )
+        self.assertIn("请指定 character", empty_name[0])
+        self.assertIn("兔耳娘", empty_name[0])
+        self.assertEqual(plugin._queue.submitted, 0)
 
     async def test_tool_only_generates_once_per_message(self):
         plugin = self.make_plugin()
@@ -462,17 +516,20 @@ class ToolFlowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_page_tool_rejects_bad_panels(self):
         plugin = self.make_plugin()
+        await plugin._character_store().put(
+            "alice", "兔耳娘", {"ref": "the rabbit-eared woman", "look": "adult woman, rabbit ears"}
+        )
         event = FakeEvent()
         broken = await collect(
-            plugin.NAI_Generate_Comic_Page(event, layout="四格", panels="not-json", character="x")
+            plugin.NAI_Generate_Comic_Page(event, layout="四格", panels="not-json", character="兔耳娘")
         )
         wrong_count = await collect(
             plugin.NAI_Generate_Comic_Page(
-                event, layout="四格", panels=json.dumps([{"no": 1, "action": "a"}]), character="x"
+                event, layout="四格", panels=json.dumps([{"no": 1, "action": "a"}]), character="兔耳娘"
             )
         )
         unknown_layout = await collect(
-            plugin.NAI_Generate_Comic_Page(event, layout="七格", panels="[]", character="x")
+            plugin.NAI_Generate_Comic_Page(event, layout="七格", panels="[]", character="兔耳娘")
         )
         self.assertIn("不是合法 JSON", broken[0])
         self.assertIn("参数错误", wrong_count[0])

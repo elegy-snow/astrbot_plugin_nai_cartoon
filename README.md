@@ -21,7 +21,7 @@ AstrBot 插件：通过 Nai2API 兼容站点生成漫画单页。**提示词由�
 
 - **同一轮消息最多出一次图**。模型在一轮里重复调用时，第二次会收到「本轮已经出过一次」，避免额度被连续烧掉。
 - **成年守卫不可绕过**：无论模型写什么，负面里始终带 `loli, child, aged down, petite, flat chest`（`NEG_BASE`）。`lolita25d` 画风预设含幼态权重，本插件故意不提供。
-- 插件的**提示词部分由模型的工具说明约束**，插件不替换 `【1】` 这类占位符：模型必须自己把角色外貌写成英文标签，或用 `character` 参数指定角色卡。
+- 插件的**提示词部分由模型的工具说明约束**，插件不替换 `【1】` 这类占位符：模型必须自己把角色外貌写成英文标签，或用 `character` 参数指定角色卡。`character` 可以传角色卡名，也可以传英文称呼 `ref` / 标签 `tag`（忽略大小写与开头的 the/a/an）；卡库为空或角色不存在时，工具会直接把可选项和替代做法回给模型，让它当轮自行改对。
 - `image_mode = prompt_only` 时工具不出图，只把组装好的提示词回给模型（此模式不需要密钥）；`send_preview` 开启时出图回执里附带本次提示词。
 - 设置页 **`enable_llm_tool`** 关掉后工具不再出图，只能用下面的指令。旧版 AstrBot 若没有 `filter.llm_tool`，插件仍会加载，只是工具不注册（启动日志会 warning）。
 
@@ -81,7 +81,7 @@ AstrBot 插件：通过 Nai2API 兼容站点生成漫画单页。**提示词由�
 py -3.14 -m unittest discover -s tests -v
 ```
 
-共 59 项，其中 `tests/test_llm_flow.py` 用 `tests/_astrbot_stub.py`（本机没有 astrbot 包时的最小桩）真实执行了会话 LLM 工具的流程：画师串映射、角色卡合并、负面守卫、一轮一次出图、`prompt_only` 与参数校验。
+共 64 项，其中 `tests/test_llm_flow.py` 用 `tests/_astrbot_stub.py`（本机没有 astrbot 包时的最小桩）真实执行了会话 LLM 工具的流程：画师串映射、角色卡按名字/英文称呼匹配、负面守卫、一轮一次出图、找不到角色卡时的纠错提示、`prompt_only` 与参数校验。
 
 另有一条静态守卫 `LlmToolSchemaTests`：工具注释里的 `名字(类型):` **只能是 `string / number / object / array / boolean`**——AstrBot 注册工具时遇到别的类型会直接抛 `ValueError`（`astrbot/core/provider/func_tool_manager.py: SUPPORTED_TYPES`），导致插件安装失败。曾经把 `steps` 写成 `integer` 就是这样炸的。
 

@@ -15,6 +15,16 @@ class CharacterStoreError(ValueError):
     pass
 
 
+_ARTICLE = re.compile(r"^(?:the|a|an)\s+", re.IGNORECASE)
+_SPACES = re.compile(r"\s+")
+
+
+def _canonical(value: Any) -> str:
+    """匹配用归一化：去空白、忽略大小写、忽略开头冠词 the/a/an。"""
+    text = _SPACES.sub(" ", str(value or "").strip())
+    return _ARTICLE.sub("", text).casefold()
+
+
 def _validate_card(name: str, card: Mapping[str, Any]) -> dict[str, Any]:
     clean_name = name.strip()
     if not clean_name:
@@ -98,11 +108,33 @@ class CharacterStore:
         await self.plugin.put_kv_data(self._key(user_id), json.dumps(cards, ensure_ascii=False))
 
     def _configured_card(self, name: str) -> dict[str, Any] | None:
-        matched_name = next((key for key in self.configured_cards if key.casefold() == name.casefold()), None)
+        matched_name = self._match_name(self.configured_cards, name)
         if matched_name is None:
             return None
-        card = self.configured_cards[matched_name]
-        return _validate_card(matched_name, card)
+        return _validate_card(matched_name, self.configured_cards[matched_name])
+
+    @staticmethod
+    def _match_name(cards: Mapping[str, Mapping[str, Any]], name: str) -> str | None:
+        """按角色卡名匹配，其次按英文称呼 `ref` / 标签 `tag` 兜底。
+
+        会话里的 LLM 常把 `ref`（如 `the rabbit-eared woman`，甚至漏掉冠词的
+        `rabbit-eared woman`）当成卡名传进来，因此：卡名 → 别名（忽略大小写、
+        忽略 the/a/an 冠词）逐级匹配；空字符串不参与匹配。
+        """
+        wanted = _canonical(name)
+        if not wanted:
+            return None
+        exact = next((str(key) for key in cards if _canonical(key) == wanted), None)
+        if exact is not None:
+            return exact
+        for key, card in cards.items():
+            if not isinstance(card, Mapping):
+                continue
+            for field in ("ref", "tag"):
+                alias = _canonical(card.get(field))
+                if alias and alias == wanted:
+                    return str(key)
+        return None
 
     async def list(self, user_id: str) -> list[str]:
         names = set(await self._load(user_id))
@@ -111,14 +143,11 @@ class CharacterStore:
 
     async def get(self, user_id: str, name: str) -> dict[str, Any] | None:
         cards = await self._load(user_id)
-        card = cards.get(name)
-        if card is None:
-            card = next((value for key, value in cards.items() if key.casefold() == name.casefold()), None)
-        if card is None:
-            card = self._configured_card(name)
-        if card is None:
-            return None
-        return dict(card, slot=1)
+        matched_name = self._match_name(cards, name)
+        if matched_name is not None:
+            return dict(cards[matched_name], slot=1)
+        card = self._configured_card(name)
+        return dict(card, slot=1) if card is not None else None
 
     async def put(self, user_id: str, name: str, card: Mapping[str, Any]) -> None:
         clean = _validate_card(name, card)
