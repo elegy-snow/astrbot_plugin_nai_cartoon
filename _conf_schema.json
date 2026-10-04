@@ -11,16 +11,12 @@
     "default": "direct",
     "options": ["direct", "prompt_only"]
   },
-  "allow_user_key": {
-    "description": "允许用户绑定自己的密钥",
-    "type": "bool",
-    "default": true
-  },
-  "fallback_key": {
-    "description": "兜底密钥",
+  "user_key": {
+    "description": "NovelAI 站点密钥",
     "type": "string",
     "default": "",
-    "secret": true
+    "secret": true,
+    "hint": "为此插件安装配置个人密钥；也可继续使用 /nai key 命令绑定。"
   },
   "queue_timeout": {
     "description": "单任务超时（秒）",
@@ -92,6 +88,12 @@
     "type": "bool",
     "default": false,
     "hint": "/nai page 未提供 no_sex 时使用；只画手或道具的页面可开启。"
+  },
+  "character_cards": {
+    "description": "角色卡库（JSON）",
+    "type": "text",
+    "default": "{}",
+    "hint": "按角色名填写对象，例如 {\"兔耳娘\":{\"ref\":\"the rabbit-eared woman\",\"look\":\"adult woman, rabbit ears, long hair\",\"uc\":\"fox ears\",\"parts\":{\"ears\":\"her rabbit ears\"}}}。可通过 /nai char 命令管理个人 KV 角色卡。"
   },
   "default_size": {
     "description": "默认出图尺寸档位",

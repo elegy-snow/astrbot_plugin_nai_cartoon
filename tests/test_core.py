@@ -131,6 +131,28 @@ class FakeKVPlugin:
 
 
 class CharacterStoreTests(unittest.IsolatedAsyncioTestCase):
+    async def test_settings_cards_are_available_and_kv_card_overrides(self):
+        plugin = FakeKVPlugin()
+        configured = {"Card": {"ref": "configured woman", "look": "adult woman, configured hair"}}
+        store = CharacterStore(plugin, configured)
+        configured_card = await store.get("alice", "Card")
+        self.assertEqual(configured_card["ref"], "configured woman")
+        self.assertEqual(await store.list("alice"), ["Card"])
+        await store.put("alice", "Card", {"ref": "kv woman", "look": "adult woman, kv hair"})
+        self.assertEqual((await store.get("alice", "Card"))["ref"], "kv woman")
+
+    async def test_descriptions_are_not_truncated(self):
+        plugin = FakeKVPlugin()
+        store = CharacterStore(plugin)
+        look = "adult woman, " + "long hair, " * 300
+        part = "distinctive feature " * 50
+        await store.put("alice", "LongDescription", {
+            "ref": "the adult woman", "look": look, "parts": {"detail": part}
+        })
+        stored = await store.get("alice", "LongDescription")
+        self.assertEqual(stored["look"], look.strip())
+        self.assertEqual(stored["parts"]["detail"], part.strip())
+
     async def test_crud_is_scoped_per_user_and_requires_adult_detail(self):
         plugin = FakeKVPlugin()
         store = CharacterStore(plugin)

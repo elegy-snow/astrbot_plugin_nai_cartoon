@@ -21,7 +21,6 @@ class NaiDoujinPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
         self._queue: DrawQueue | None = None
-        self._characters = CharacterStore(self)
 
     def _config(self, key: str, default: Any) -> Any:
         try:
@@ -31,6 +30,9 @@ class NaiDoujinPlugin(Star):
 
     def _client(self) -> NaiClient:
         return NaiClient(str(self._config("station_base", "https://nai.sta1n.cn")))
+
+    def _character_store(self) -> CharacterStore:
+        return CharacterStore(self, self._config("character_cards", "{}"))
 
     async def initialize(self) -> None:
         self._queue = DrawQueue(
@@ -45,11 +47,11 @@ class NaiDoujinPlugin(Star):
             logger.warning("NAI station probe failed: %s", exc)
 
     async def _get_token(self, user_id: str) -> str:
-        if bool(self._config("allow_user_key", True)):
-            token = await self.get_kv_data(f"token:{user_id}", "")
-            if token:
-                return str(token)
-        return str(self._config("fallback_key", "") or "")
+        configured_key = str(self._config("user_key", "") or "").strip()
+        if configured_key:
+            return configured_key
+        token = await self.get_kv_data(f"token:{user_id}", "")
+        return str(token or "")
 
     @filter.command("nai")
     async def nai(self, event: AstrMessageEvent):
@@ -74,9 +76,6 @@ class NaiDoujinPlugin(Star):
                 return
             balance = account.get("balance", account.get("anlas", "未知"))
             yield event.plain_result(f"密钥已配置，当前余额：{balance} 点。")
-            return
-        if not bool(self._config("allow_user_key", True)):
-            yield event.plain_result("管理员已关闭用户自助绑定密钥。")
             return
         try:
             account = await self._client().me(key)
@@ -203,7 +202,7 @@ class NaiDoujinPlugin(Star):
         name = str(payload.get("character", "")).strip()
         if not name:
             raise ValueError("请指定角色卡名")
-        character = await self._characters.get(user_id, name)
+        character = await self._character_store().get(user_id, name)
         if character is None:
             raise ValueError(f"未找到角色卡：{name}")
         panels = payload.get("panels")
@@ -265,11 +264,11 @@ class NaiDoujinPlugin(Star):
         name = name.strip()
         try:
             if action == "list":
-                names = await self._characters.list(user_id)
+                names = await self._character_store().list(user_id)
                 yield event.plain_result("角色卡：" + ("、".join(names) if names else "（暂无）"))
                 return
             if action == "show":
-                card = await self._characters.get(user_id, name)
+                card = await self._character_store().get(user_id, name)
                 if card is None:
                     yield event.plain_result(f"未找到角色卡：{name}")
                     return
@@ -283,11 +282,11 @@ class NaiDoujinPlugin(Star):
                 card = json.loads(card_json)
                 if not isinstance(card, dict):
                     raise CharacterStoreError("角色卡内容必须是 JSON 对象")
-                await self._characters.put(user_id, name, card)
+                await self._character_store().put(user_id, name, card)
                 yield event.plain_result(f"角色卡「{name}」已保存。")
                 return
             if action in {"del", "delete"}:
-                if await self._characters.delete(user_id, name):
+                if await self._character_store().delete(user_id, name):
                     yield event.plain_result(f"角色卡「{name}」已删除。")
                 else:
                     yield event.plain_result(f"未找到角色卡：{name}")

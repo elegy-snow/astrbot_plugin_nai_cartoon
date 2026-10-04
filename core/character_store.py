@@ -17,8 +17,8 @@ class CharacterStoreError(ValueError):
 
 def _validate_card(name: str, card: Mapping[str, Any]) -> dict[str, Any]:
     clean_name = name.strip()
-    if not clean_name or len(clean_name) > 40:
-        raise CharacterStoreError("角色名不能为空且不能超过 40 字")
+    if not clean_name:
+        raise CharacterStoreError("角色名不能为空")
     if not re.fullmatch(r"[\w\u4e00-\u9fff-]+", clean_name):
         raise CharacterStoreError("角色名仅支持中英文、数字、下划线和连字符")
     ref = str(card.get("ref", "")).strip()
@@ -27,8 +27,6 @@ def _validate_card(name: str, card: Mapping[str, Any]) -> dict[str, Any]:
         raise CharacterStoreError("角色称呼 ref 必填")
     if not look:
         raise CharacterStoreError("角色外貌 look 必填，请写清成年外貌特征")
-    if len(ref) > 160 or len(look) > 2000:
-        raise CharacterStoreError("角色称呼或外貌描述过长")
     if not re.search(r"\b(adult|woman|man|成年)\b", look, re.IGNORECASE):
         raise CharacterStoreError("原创角色外貌必须明确标注成年（如 adult woman）")
     raw_parts = card.get("parts") or {}
@@ -41,20 +39,26 @@ def _validate_card(name: str, card: Mapping[str, Any]) -> dict[str, Any]:
         if not re.fullmatch(r"[\w-]{1,32}", key):
             raise CharacterStoreError(f"无效的部件名：{key}")
         if value:
-            parts[key] = value[:500]
+            parts[key] = value
     return {
         "name_zh": clean_name,
         "ref": ref,
         "look": look,
-        "uc": str(card.get("uc", "")).strip()[:2000],
-        "tag": str(card.get("tag", "")).strip()[:500],
+        "uc": str(card.get("uc", "")).strip(),
+        "tag": str(card.get("tag", "")).strip(),
         "parts": parts,
     }
 
 
 class CharacterStore:
-    def __init__(self, plugin: Any):
+    def __init__(self, plugin: Any, configured_cards: Any = "{}"):
         self.plugin = plugin
+        if isinstance(configured_cards, str):
+            try:
+                configured_cards = json.loads(configured_cards or "{}")
+            except json.JSONDecodeError:
+                configured_cards = {}
+        self.configured_cards = configured_cards if isinstance(configured_cards, dict) else {}
 
     def _key(self, user_id: str) -> str:
         return f"{STORE_KEY_PREFIX}{user_id}"
@@ -75,14 +79,26 @@ class CharacterStore:
     async def _save(self, user_id: str, cards: dict[str, dict[str, Any]]) -> None:
         await self.plugin.put_kv_data(self._key(user_id), json.dumps(cards, ensure_ascii=False))
 
+    def _configured_card(self, name: str) -> dict[str, Any] | None:
+        card = self.configured_cards.get(name)
+        if card is None:
+            card = next((value for key, value in self.configured_cards.items() if str(key).casefold() == name.casefold()), None)
+        if not isinstance(card, dict):
+            return None
+        return _validate_card(name, card)
+
     async def list(self, user_id: str) -> list[str]:
-        return sorted(await self._load(user_id), key=str.casefold)
+        names = set(await self._load(user_id))
+        names.update(str(name) for name in self.configured_cards)
+        return sorted(names, key=str.casefold)
 
     async def get(self, user_id: str, name: str) -> dict[str, Any] | None:
         cards = await self._load(user_id)
         card = cards.get(name)
         if card is None:
             card = next((value for key, value in cards.items() if key.casefold() == name.casefold()), None)
+        if card is None:
+            card = self._configured_card(name)
         if card is None:
             return None
         return dict(card, slot=1)
