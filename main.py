@@ -210,13 +210,13 @@ class NaiDoujinPlugin(Star):
         if not isinstance(panels, list):
             raise ValueError("panels 必须是分镜数组")
         return build_page_prompt(
-            layout=str(payload.get("layout", "四格")),
+            layout=str(payload.get("layout", self._config("default_layout", "四格"))),
             panels=panels,
             characters=[character],
-            explicit=bool(payload.get("explicit", False)),
-            behavior_tags=str(payload.get("behavior_tags", "")),
+            explicit=bool(payload.get("explicit", self._config("default_explicit", False))),
+            behavior_tags=str(payload.get("behavior_tags", self._config("default_behavior_tags", ""))),
             bw=bool(self._config("bw_default", True)),
-            no_sex=bool(payload.get("no_sex", False)),
+            no_sex=bool(payload.get("no_sex", self._config("no_sex_default", False))),
         )
 
     @filter.command("nai prompt")

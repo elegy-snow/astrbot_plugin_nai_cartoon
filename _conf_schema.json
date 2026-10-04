@@ -65,7 +65,33 @@
   "bw_default": {
     "description": "默认黑白模式",
     "type": "bool",
-    "default": true
+    "default": true,
+    "hint": "关闭后移除黑白风格标签和彩色负面词 colorful。"
+  },
+  "default_layout": {
+    "description": "默认漫画版式",
+    "type": "string",
+    "default": "四格",
+    "options": ["四格", "三格主格下", "两格上下", "两格斜线", "五格", "六格", "整页大格"],
+    "hint": "/nai page 未提供 layout 时使用。"
+  },
+  "default_explicit": {
+    "description": "默认成人内容标签",
+    "type": "bool",
+    "default": false,
+    "hint": "/nai page 未提供 explicit 时使用；只控制提示词标签，不绕过平台或站点限制。"
+  },
+  "default_behavior_tags": {
+    "description": "默认行为标签",
+    "type": "text",
+    "default": "",
+    "hint": "/nai page 未提供 behavior_tags 时使用；每页请求仍可覆盖。"
+  },
+  "no_sex_default": {
+    "description": "默认不含性行为",
+    "type": "bool",
+    "default": false,
+    "hint": "/nai page 未提供 no_sex 时使用；只画手或道具的页面可开启。"
   },
   "default_size": {
     "description": "默认出图尺寸档位",
