@@ -1,5 +1,7 @@
 import asyncio
+import ast
 import json
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -17,6 +19,75 @@ from core.llm_prompt import (  # noqa: E402
     normalize_tags,
 )
 from core.prompt_builder import NEG_BASE, NEG_BUBBLE, NEG_NO_SEX, NEG_XRAY, base_negative  # noqa: E402
+
+
+class LlmToolSchemaTests(unittest.TestCase):
+    """守 AstrBot 的 LLM 工具注释契约。
+
+    AstrBot 在注册工具时解析函数注释里的 `名字(类型):`，类型不在
+    SUPPORTED_TYPES 内会**直接抛 ValueError，导致插件安装/加载失败**
+    （astrbot/core/provider/func_tool_manager.py: SUPPORTED_TYPES）。
+    曾经把 steps 写成 integer 就是这样炸的。
+    """
+
+    ASTRBOT_TOOL_TYPES = {"string", "number", "object", "array", "boolean"}
+
+    @classmethod
+    def setUpClass(cls):
+        cls.main = load_plugin()
+        cls.source = (Path(__file__).resolve().parents[1] / "main.py").read_text(encoding="utf-8")
+        tree = ast.parse(cls.source)
+        plugin_class = next(
+            node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "NaiDoujinPlugin"
+        )
+        cls.tools = [
+            node
+            for node in plugin_class.body
+            if isinstance(node, ast.AsyncFunctionDef)
+            and any(
+                isinstance(decorator, ast.Call)
+                and getattr(decorator.func, "id", getattr(decorator.func, "attr", "")) == "_llm_tool"
+                for decorator in node.decorator_list
+            )
+        ]
+
+    def test_expected_tools_are_registered(self):
+        self.assertEqual(
+            {node.name for node in self.tools},
+            {"NAI_Generate_Image", "NAI_Generate_Comic_Page", "NAI_List_Characters"},
+        )
+
+    def test_param_types_are_supported_by_astrbot(self):
+        for node in self.tools:
+            docstring = ast.get_docstring(node) or ""
+            for name, type_name in re.findall(r"^ {4}(\w+)\(([^)]+)\):", docstring, re.M):
+                with self.subTest(tool=node.name, arg=name):
+                    self.assertIn(
+                        type_name,
+                        self.ASTRBOT_TOOL_TYPES,
+                        f"{node.name}.{name} 的类型 {type_name} 会让 AstrBot 注册工具时抛 ValueError",
+                    )
+
+    def test_documented_args_match_the_signature(self):
+        for node in self.tools:
+            docstring = ast.get_docstring(node) or ""
+            documented = [name for name, _ in re.findall(r"^ {4}(\w+)\(([^)]+)\):", docstring, re.M)]
+            expected = [arg.arg for arg in node.args.args][2:]  # 跳过 self 与 event
+            with self.subTest(tool=node.name):
+                self.assertEqual(documented, expected)
+
+    def test_descriptions_exist_and_state_the_adult_guard(self):
+        for node in self.tools:
+            docstring = (ast.get_docstring(node) or "").strip()
+            with self.subTest(tool=node.name):
+                self.assertTrue(docstring)
+                if node.name != "NAI_List_Characters":
+                    self.assertTrue(
+                        "成年" in docstring or "adult" in docstring.casefold(),
+                        f"{node.name} 的说明里必须写明只画成年人",
+                    )
+        image_tool = next(node for node in self.tools if node.name == "NAI_Generate_Image")
+        self.assertIn("loli, child, aged down, petite, flat chest", ast.get_docstring(image_tool))
 
 
 class ArtistPresetTests(unittest.TestCase):

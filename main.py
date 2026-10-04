@@ -474,7 +474,7 @@ class NaiDoujinPlugin(Star):
             size(string): 可选。竖图 / 横图 / 方图 / 2K竖图 / 2K横图 / 2K方图 / 4K竖图 / 4K横图 / 4K方图。
                 留空用插件设置的默认尺寸。2K/4K 分别约 15/25 点，是普通图的 15–25 倍，用户没明确
                 要求高清时不要用。
-            steps(integer): 可选。1-50，留空或 0 用插件设置的默认步数。
+            steps(number): 可选。1-50，留空或 0 用插件设置的默认步数。
             style(string): 可选画风预设：fresh / comicDoujin / 2.5d / doujin / galgame / custom / none。
                 留空用插件默认画风；none 表示不传画师串。
             color(boolean): 可选。true 表示这一张是彩色页（移除黑白守卫和 color 负面）。
@@ -583,7 +583,7 @@ class NaiDoujinPlugin(Star):
                 （之后由人贴中文台词）。
             character(string): 必填。角色卡名，用于取称呼与英文外貌；用 NAI_List_Characters 查询。
             size(string): 可选。同 NAI_Generate_Image；留空用插件设置的默认尺寸。
-            steps(integer): 可选。1-50，留空或 0 用插件默认步数。
+            steps(number): 可选。1-50，留空或 0 用插件默认步数。
             style(string): 可选画风预设：fresh / comicDoujin / 2.5d / doujin / galgame / custom / none。
             color(boolean): 可选。true 画彩色页。
             no_sex(boolean): 可选。true 表示这一页不画插入（只用手或道具）。

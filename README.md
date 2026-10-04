@@ -81,4 +81,12 @@ AstrBot 插件：通过 Nai2API 兼容站点生成漫画单页。**提示词由�
 py -3.14 -m unittest discover -s tests -v
 ```
 
-共 55 项，其中 `tests/test_llm_flow.py` 用 `tests/_astrbot_stub.py`（本机没有 astrbot 包时的最小桩）真实执行了会话 LLM 工具的流程：画师串映射、角色卡合并、负面守卫、一轮一次出图、`prompt_only` 与参数校验。
+共 59 项，其中 `tests/test_llm_flow.py` 用 `tests/_astrbot_stub.py`（本机没有 astrbot 包时的最小桩）真实执行了会话 LLM 工具的流程：画师串映射、角色卡合并、负面守卫、一轮一次出图、`prompt_only` 与参数校验。
+
+另有一条静态守卫 `LlmToolSchemaTests`：工具注释里的 `名字(类型):` **只能是 `string / number / object / array / boolean`**——AstrBot 注册工具时遇到别的类型会直接抛 `ValueError`（`astrbot/core/provider/func_tool_manager.py: SUPPORTED_TYPES`），导致插件安装失败。曾经把 `steps` 写成 `integer` 就是这样炸的。
+
+装好后可用真实运行环境复核工具注册（把 `<实例>\core` 加入 `sys.path`）：
+
+```powershell
+python -c "import sys, importlib; sys.path.insert(0, r'<实例>\core'); sys.path.insert(0, r'E:\dsh_work'); importlib.import_module('astrbot_plugin_nai_cartoon.main'); import astrbot.core.provider.register as reg; print([t.name for t in reg.llm_tools.func_list])"
+```
