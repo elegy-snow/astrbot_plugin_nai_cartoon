@@ -1,0 +1,120 @@
+import asyncio
+import unittest
+
+from core.character_store import CharacterStore, CharacterStoreError
+from core.placeholders import PlaceholderError, replace_placeholders
+from core.pricing import cost_for_size
+from core.prompt_builder import NEG_BASE, NEG_BUBBLE, TAGS_STYLE, build_page_prompt
+
+
+class PricingTests(unittest.TestCase):
+    def test_step_thresholds_for_standard_model(self):
+        expected = {28: 1, 29: 6, 35: 6, 36: 8, 45: 8, 46: 10, 50: 10}
+        for steps, cost in expected.items():
+            with self.subTest(steps=steps):
+                self.assertEqual(cost_for_size("竖图", "nai-diffusion-4-5-full", steps), cost)
+
+    def test_size_and_model_interaction(self):
+        self.assertEqual(cost_for_size("竖图", "nai-diffusion-5-full", 28), 8)
+        self.assertEqual(cost_for_size("2K竖图", "nai-diffusion-5-full", 28), 15)
+        self.assertEqual(cost_for_size("4K横图", "nai-diffusion-4-5-full", 46), 33)
+        self.assertEqual(cost_for_size("竖图", "nai-diffusion-4-5-full", 0), 1)
+        self.assertEqual(cost_for_size("竖图", "nai-diffusion-4-5-full", 500), 10)
+
+
+class PlaceholderTests(unittest.TestCase):
+    def setUp(self):
+        self.character = {
+            "slot": 1,
+            "name_zh": "兔耳娘",
+            "ref": "the rabbit-eared woman",
+            "tag": "rabbit-eared woman",
+            "look": "monochrome, greyscale, adult woman, rabbit ears",
+            "parts": {"ears": "her long rabbit ears"},
+        }
+
+    def test_replaces_all_supported_tokens(self):
+        result = replace_placeholders(
+            "【1:look】, 【1】, 【1.ears】, 【1:name】, 【style】, 【quality】",
+            [self.character],
+            style_tags="monochrome, manga",
+            quality_tags="best quality",
+        )
+        self.assertIn("the rabbit-eared woman, rabbit-eared woman, monochrome", result)
+        self.assertIn("her long rabbit ears", result)
+        self.assertIn("rabbit-eared", result)
+        self.assertIn("monochrome, manga", result)
+        self.assertIn("best quality", result)
+        self.assertNotIn("【", result)
+
+    def test_missing_character_or_unknown_placeholder_fails(self):
+        with self.assertRaises(PlaceholderError):
+            replace_placeholders("【2】", [self.character])
+        with self.assertRaises(PlaceholderError):
+            replace_placeholders("【unknown】", [self.character])
+
+    def test_character_box_mode_uses_ref_only(self):
+        result = replace_placeholders("【1:look】", [self.character], char_boxes=True)
+        self.assertEqual(result, "the rabbit-eared woman")
+
+
+class PromptBuilderTests(unittest.TestCase):
+    character = {
+        "slot": 1,
+        "name_zh": "兔耳娘",
+        "ref": "the rabbit-eared woman",
+        "look": "monochrome, greyscale, adult woman, rabbit ears",
+        "uc": "fox ears, fox tail",
+        "parts": {},
+    }
+
+    def test_page_prompt_and_conditional_negatives(self):
+        prompt, negative = build_page_prompt(
+            layout="两格上下",
+            panels=[
+                {"no": 1, "action": "close-up portrait"},
+                {"no": 2, "action": "looking toward the viewer", "dialogue": "hello"},
+            ],
+            characters=[self.character],
+        )
+        self.assertIn("two panels stacked one above the other", prompt)
+        self.assertIn("Panel 1 (top)", prompt)
+        self.assertIn("monochrome, greyscale, comic", prompt)
+        self.assertIn(NEG_BASE, negative)
+        self.assertIn("fox ears, fox tail", negative)
+        self.assertIn(NEG_BUBBLE, negative)
+        self.assertNotIn("【", prompt)
+
+    def test_layout_mismatch_fails(self):
+        with self.assertRaises(ValueError):
+            build_page_prompt(layout="四格", panels=[{"action": "one panel"}], characters=[self.character])
+
+
+class FakeKVPlugin:
+    def __init__(self):
+        self.values = {}
+
+    async def get_kv_data(self, key, default):
+        return self.values.get(key, default)
+
+    async def put_kv_data(self, key, value):
+        self.values[key] = value
+
+
+class CharacterStoreTests(unittest.IsolatedAsyncioTestCase):
+    async def test_crud_is_scoped_per_user_and_requires_adult_detail(self):
+        plugin = FakeKVPlugin()
+        store = CharacterStore(plugin)
+        card = {"ref": "the adult woman", "look": "adult woman, long hair", "parts": {"ears": "her rabbit ears"}}
+        await store.put("alice", "兔耳娘", card)
+        self.assertEqual(await store.list("alice"), ["兔耳娘"])
+        self.assertEqual((await store.get("alice", "兔耳娘"))["slot"], 1)
+        self.assertEqual(await store.list("bob"), [])
+        self.assertTrue(await store.delete("alice", "兔耳娘"))
+        self.assertFalse(await store.delete("alice", "兔耳娘"))
+        with self.assertRaises(CharacterStoreError):
+            await store.put("alice", "未成年", {"ref": "person", "look": "long hair"})
+
+
+if __name__ == "__main__":
+    unittest.main()

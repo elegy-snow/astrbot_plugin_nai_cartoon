@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from typing import Any
 
@@ -8,8 +9,10 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Image
 from astrbot.api.star import Context, Star, register
 
-from .core.nai_client import NaiAPIError, NaiClient
+from .core.character_store import CharacterStore, CharacterStoreError
+from .core.nai_client import NaiClient
 from .core.pricing import cost_for_size
+from .core.prompt_builder import LAYOUTS, build_page_prompt
 from .core.queue import DrawQueue, QueueFullError
 
 
@@ -18,6 +21,7 @@ class NaiDoujinPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
         self._queue: DrawQueue | None = None
+        self._characters = CharacterStore(self)
 
     def _config(self, key: str, default: Any) -> Any:
         try:
@@ -121,12 +125,10 @@ class NaiDoujinPlugin(Star):
             return
         yield event.plain_result(f"当前参数：{size} / {model} / {steps} 步，单张预计 {amount} 点。")
 
-    @filter.command("nai draw")
-    async def draw(self, event: AstrMessageEvent, prompt: str = ""):
-        """按当前默认参数生成单张图片。"""
+    async def _draw_prompt(self, event: AstrMessageEvent, prompt: str):
         prompt = prompt.strip()
         if not prompt:
-            yield event.plain_result("请提供提示词：/nai draw <提示词>。")
+            yield event.plain_result("请提供提示词。")
             return
         token = await self._get_token(str(event.get_sender_id()))
         if not token:
@@ -189,6 +191,111 @@ class NaiDoujinPlugin(Star):
         except Exception as exc:
             logger.warning("NAI draw failed: %s", exc)
             yield event.plain_result(f"生成失败：{str(exc)[:300]}")
+
+    @filter.command("nai draw")
+    async def draw(self, event: AstrMessageEvent, prompt: str = ""):
+        """直接按提示词生成单张图片。"""
+        async for result in self._draw_prompt(event, prompt):
+            yield result
+
+    async def _build_page(self, user_id: str, payload: dict[str, Any]) -> tuple[str, str]:
+        name = str(payload.get("character", "")).strip()
+        if not name:
+            raise ValueError("请指定角色卡名")
+        character = await self._characters.get(user_id, name)
+        if character is None:
+            raise ValueError(f"未找到角色卡：{name}")
+        panels = payload.get("panels")
+        if not isinstance(panels, list):
+            raise ValueError("panels 必须是分镜数组")
+        return build_page_prompt(
+            layout=str(payload.get("layout", "四格")),
+            panels=panels,
+            characters=[character],
+            explicit=bool(payload.get("explicit", False)),
+            behavior_tags=str(payload.get("behavior_tags", "")),
+            bw=bool(self._config("bw_default", True)),
+        )
+
+    @filter.command("nai prompt")
+    async def prompt(self, event: AstrMessageEvent, payload_text: str = ""):
+        """根据角色卡和分镜 JSON 组装提示词，不出图。"""
+        try:
+            payload = json.loads(payload_text)
+            if not isinstance(payload, dict):
+                raise ValueError("参数必须是 JSON 对象")
+            assembled, negative = await self._build_page(str(event.get_sender_id()), payload)
+            yield event.plain_result(f"正向提示词：\n{assembled}\n\n负面提示词：\n{negative}")
+        except (json.JSONDecodeError, ValueError) as exc:
+            yield event.plain_result(f"参数错误：{exc}")
+        except Exception as exc:
+            logger.warning("NAI prompt build failed: %s", exc)
+            yield event.plain_result("提示词组装失败，请检查角色卡和分镜数据。")
+
+    @filter.command("nai page")
+    async def page(self, event: AstrMessageEvent, payload_text: str = ""):
+        """按角色卡和分镜 JSON 组装并生成漫画单页。"""
+        try:
+            payload = json.loads(payload_text)
+            if not isinstance(payload, dict):
+                raise ValueError("参数必须是 JSON 对象")
+            assembled, _ = await self._build_page(str(event.get_sender_id()), payload)
+        except (json.JSONDecodeError, ValueError) as exc:
+            yield event.plain_result(f"参数错误：{exc}")
+            return
+        except Exception as exc:
+            logger.warning("NAI page build failed: %s", exc)
+            yield event.plain_result("分镜组装失败，请检查角色卡和分镜数据。")
+            return
+        async for result in self._draw_prompt(event, assembled):
+            yield result
+
+    @filter.command("nai layout")
+    async def layout(self, event: AstrMessageEvent):
+        """列出提示词组装器支持的版式。"""
+        yield event.plain_result("可用版式：" + "、".join(LAYOUTS))
+
+    @filter.command("nai char")
+    async def char(self, event: AstrMessageEvent, action: str = "list", name: str = "", card_json: str = ""):
+        """角色卡管理：list/show/new/del；new 后附角色 JSON。"""
+        user_id = str(event.get_sender_id())
+        action = action.strip().lower() or "list"
+        name = name.strip()
+        try:
+            if action == "list":
+                names = await self._characters.list(user_id)
+                yield event.plain_result("角色卡：" + ("、".join(names) if names else "（暂无）"))
+                return
+            if action == "show":
+                card = await self._characters.get(user_id, name)
+                if card is None:
+                    yield event.plain_result(f"未找到角色卡：{name}")
+                    return
+                card.pop("slot", None)
+                yield event.plain_result(json.dumps(card, ensure_ascii=False, indent=2))
+                return
+            if action == "new":
+                if not name:
+                    yield event.plain_result('格式：/nai char new <名称> <JSON>，例：{"ref":"the woman","look":"adult woman, ...","parts":{}}')
+                    return
+                card = json.loads(card_json)
+                if not isinstance(card, dict):
+                    raise CharacterStoreError("角色卡内容必须是 JSON 对象")
+                await self._characters.put(user_id, name, card)
+                yield event.plain_result(f"角色卡「{name}」已保存。")
+                return
+            if action in {"del", "delete"}:
+                if await self._characters.delete(user_id, name):
+                    yield event.plain_result(f"角色卡「{name}」已删除。")
+                else:
+                    yield event.plain_result(f"未找到角色卡：{name}")
+                return
+            yield event.plain_result("用法：/nai char list | show <名称> | new <名称> <JSON> | del <名称>")
+        except (json.JSONDecodeError, CharacterStoreError) as exc:
+            yield event.plain_result(f"角色卡数据错误：{exc}")
+        except Exception as exc:
+            logger.warning("NAI character operation failed: %s", exc)
+            yield event.plain_result("角色卡操作失败。")
 
     async def terminate(self) -> None:
         if self._queue:
