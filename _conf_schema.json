@@ -11,6 +11,12 @@
     "default": "direct",
     "options": ["direct", "prompt_only"]
   },
+  "enable_llm_tool": {
+    "description": "允许会话中的 LLM 直接出图",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，你在聊天里提需求，会话中的模型会自己把需求细化成提示词并调用出图工具；关闭则只能用 /nai 指令。"
+  },
   "user_key": {
     "description": "NovelAI 站点密钥",
     "type": "string",

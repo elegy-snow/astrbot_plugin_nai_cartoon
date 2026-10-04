@@ -4,20 +4,40 @@ import json
 from typing import Any
 
 from astrbot.api import logger
-from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.message_components import Image
 from astrbot.api.star import Context, Star, register
 
+from .core.artist_presets import PRESET_CHOICES, artist_for_preset
 from .core.character_store import CharacterStore, CharacterStoreError
 from .core.config_utils import config_value
+from .core.draw_flow import DrawError, resolve_cost, resolve_model, resolve_size, resolve_steps
+from .core.llm_prompt import compose_negative, detect_conditionals, merge_character, normalize_tags
 from .core.nai_client import NaiClient
 from .core.pricing import cost_for_size
 from .core.prompt_builder import LAYOUTS, base_negative, build_page_prompt
 from .core.queue import DrawQueue, QueueFullError
 from .core.usage import UsageStore
 
+# 同一条消息里最多出一次图（防止模型在一轮里反复调用工具烧额度）。
+DRAW_STATE_KEY = "nai_cartoon_draw_state"
 
-@register("astrbot_plugin_nai_cartoon", "elegy-snow", "NovelAI 同人漫画单页生成", "0.1.0")
+
+def _llm_tool():
+    """注册会话 LLM 工具；旧版 AstrBot 没有 filter.llm_tool 时退化为空装饰器。
+
+    退化后工具不会注册（聊天指令不受影响），插件本身不会因为缺 API 而加载失败。
+    """
+    factory = getattr(filter, "llm_tool", None)
+    if factory is None:
+        def _identity(func):
+            return func
+
+        return _identity
+    return factory()
+
+
+@register("astrbot_plugin_nai_cartoon", "elegy-snow", "NovelAI 同人漫画单页生成", "0.2.0")
 class NaiDoujinPlugin(Star):
     def __init__(self, context: Context, config: Any = None):
         if config is None:
@@ -67,6 +87,10 @@ class NaiDoujinPlugin(Star):
             logger.info("NAI station settings loaded (costPerImage=%s)", settings.get("costPerImage", "unknown"))
         except Exception as exc:
             logger.warning("NAI station probe failed: %s", exc)
+        if getattr(filter, "llm_tool", None) is None:
+            logger.warning("当前 AstrBot 版本没有 filter.llm_tool，会话 LLM 出图工具未注册（聊天指令不受影响）")
+        elif not bool(self._config("enable_llm_tool", True)):
+            logger.info("会话 LLM 出图工具已在设置页关闭（enable_llm_tool=false）")
 
     async def _get_token(self, user_id: str) -> str:
         configured_key = str(self._config("user_key", "") or "").strip()
@@ -157,54 +181,50 @@ class NaiDoujinPlugin(Star):
             return
         yield event.plain_result(f"当前参数：{size} / {model} / {steps} 步，单张预计 {amount} 点。")
 
-    async def _draw_prompt(self, event: AstrMessageEvent, prompt: str):
-        prompt = prompt.strip()
-        if not prompt:
-            yield event.plain_result("请提供提示词。")
-            return
-        user_id = str(event.get_sender_id())
+    def _artist(self, style: str = "") -> str:
+        """解析要发给站点的画师串。
+
+        `style` 为空时用设置页的默认画风预设。设置页存的只是预设名
+        （fresh/doujin/...），必须换成站点前端里的真实画师串再发送。
+        """
+        choice = str(style or "").strip() or str(self._config("default_artist_preset", "doujin"))
+        return artist_for_preset(choice, str(self._config("custom_artist", "") or ""))
+
+    async def _start_draw(
+        self,
+        user_id: str,
+        *,
+        prompt: str,
+        negative: str,
+        size: str,
+        model: str,
+        steps: int,
+        artist: str,
+    ) -> tuple[Any, int]:
+        """额度/成本预检后把任务提交到本机队列，返回 (future, 预计点数)。"""
         token = await self._get_token(user_id)
         if not token:
-            yield event.plain_result("请先在设置页填写密钥，或使用 /nai key <密钥> 绑定。")
-            return
-        if str(self._config("image_mode", "direct")) == "prompt_only":
-            yield event.plain_result(prompt)
-            return
-
+            raise DrawError("请先在设置页填写密钥，或使用 /nai key <密钥> 绑定。")
         daily_limit = int(self._config("daily_quota", 0) or 0)
         if daily_limit > 0:
             used = await self._usage.count(user_id)
             if used >= daily_limit:
-                yield event.plain_result(f"今日出图已达上限（{used}/{daily_limit}）。可调高设置页的「每用户每日出图上限」或明日再试。")
-                return
-
-        size = str(self._config("default_size", "竖图"))
-        model = str(self._config("default_model", "nai-diffusion-4-5-full"))
-        steps = int(self._config("default_steps", 28))
-        artist = str(self._config("custom_artist", "") if self._config("default_artist_preset", "doujin") == "custom" else self._config("default_artist_preset", "doujin"))
-        bw = bool(self._config("bw_default", True))
-        negative = base_negative(bw)
-        try:
-            cost = cost_for_size(size, model, steps)
-        except ValueError as exc:
-            yield event.plain_result(str(exc))
-            return
-
+                raise DrawError(
+                    f"今日出图已达上限（{used}/{daily_limit}）。"
+                    "可调高设置页的「每用户每日出图上限」或明日再试。"
+                )
+        cost = resolve_cost(size, model, steps)
         if bool(self._config("quota_precheck", True)):
             try:
                 account = await self._client().me(token)
-                balance = account.get("balance")
-                if isinstance(balance, (int, float)) and balance < cost:
-                    yield event.plain_result(f"额度不足：本次需要 {cost} 点，当前余额 {balance} 点。")
-                    return
             except Exception as exc:
                 logger.warning("NAI quota precheck failed: %s", exc)
-                yield event.plain_result("额度预检失败，未提交任务。请检查密钥和站点状态。")
-                return
-
+                raise DrawError("额度预检失败，未提交任务。请检查密钥和站点状态。") from None
+            balance = account.get("balance")
+            if isinstance(balance, (int, float)) and balance < cost:
+                raise DrawError(f"额度不足：本次需要 {cost} 点，当前余额 {balance} 点。")
         if self._queue is None:
-            yield event.plain_result("生成队列尚未就绪，请稍后重试。")
-            return
+            raise DrawError("生成队列尚未就绪，请稍后重试。")
         client = self._client()
         operation = lambda: client.generate(
             token,
@@ -217,18 +237,85 @@ class NaiDoujinPlugin(Star):
             negative=negative,
         )
         try:
-            future = await self._queue.submit(operation)
-            yield event.plain_result(f"任务已提交到本机队列，预计费用 {cost} 点。")
-            job, image_bytes = await future
-            await self._usage.record(user_id)
-            if bool(self._config("send_preview", False)):
-                yield event.plain_result(f"提示词：\n{prompt}")
-            yield event.chain_result([Image.fromBytes(image_bytes)])
+            return await self._queue.submit(operation), cost
         except QueueFullError:
-            yield event.plain_result("排队已满，稍后再试。")
+            raise DrawError("排队已满，稍后再试。") from None
+
+    async def _finish_draw(self, user_id: str, future: Any) -> bytes:
+        """等待队列任务完成，成功后记录当日用量。"""
+        _job, image_bytes = await future
+        await self._usage.record(user_id)
+        return image_bytes
+
+    async def _generate_for_tool(
+        self,
+        user_id: str,
+        *,
+        prompt: str,
+        negative: str,
+        size: str,
+        steps: int,
+        style: str = "",
+    ) -> tuple[str, bytes | None]:
+        """会话 LLM 工具共用的出图路径，返回 (给模型的文本, 图片字节或 None)。"""
+        try:
+            future, cost = await self._start_draw(
+                user_id,
+                prompt=prompt,
+                negative=negative,
+                size=size,
+                model=resolve_model(self._config("default_model", "nai-diffusion-4-5-full"), "nai-diffusion-4-5-full"),
+                steps=steps,
+                artist=self._artist(style),
+            )
+        except DrawError as exc:
+            return f"生成失败：{exc}", None
+        try:
+            image_bytes = await self._finish_draw(user_id, future)
+        except Exception as exc:
+            logger.warning("NAI LLM tool draw failed: %s", exc)
+            return f"生成失败：{str(exc)[:300]}", None
+        reply = f"图片已生成并发送给用户（本次花费 {cost} 点），请根据本次请求继续回复。"
+        if bool(self._config("send_preview", False)):
+            reply += "\n本次使用的提示词：\n" + prompt
+        return reply, image_bytes
+
+    async def _draw_prompt(self, event: AstrMessageEvent, prompt: str, negative: str | None = None):
+        prompt = prompt.strip()
+        if not prompt:
+            yield event.plain_result("请提供提示词。")
+            return
+        user_id = str(event.get_sender_id())
+        if str(self._config("image_mode", "direct")) == "prompt_only":
+            # 只出提示词不碰站点，因此不需要密钥。
+            yield event.plain_result(prompt)
+            return
+        try:
+            size = resolve_size(self._config("default_size", "竖图"), "竖图")
+            model = resolve_model(self._config("default_model", "nai-diffusion-4-5-full"), "nai-diffusion-4-5-full")
+            steps = resolve_steps(self._config("default_steps", 28), 28)
+            future, cost = await self._start_draw(
+                user_id,
+                prompt=prompt,
+                negative=negative if negative is not None else base_negative(bool(self._config("bw_default", True))),
+                size=size,
+                model=model,
+                steps=steps,
+                artist=self._artist(),
+            )
+        except DrawError as exc:
+            yield event.plain_result(str(exc))
+            return
+        yield event.plain_result(f"任务已提交到本机队列，预计费用 {cost} 点。")
+        try:
+            image_bytes = await self._finish_draw(user_id, future)
         except Exception as exc:
             logger.warning("NAI draw failed: %s", exc)
             yield event.plain_result(f"生成失败：{str(exc)[:300]}")
+            return
+        if bool(self._config("send_preview", False)):
+            yield event.plain_result(f"提示词：\n{prompt}")
+        yield event.chain_result([Image.fromBytes(image_bytes)])
 
     @filter.command("nai draw")
     async def draw(self, event: AstrMessageEvent, prompt: str = ""):
@@ -236,7 +323,10 @@ class NaiDoujinPlugin(Star):
         async for result in self._draw_prompt(event, prompt):
             yield result
 
-    async def _build_page(self, user_id: str, payload: dict[str, Any]) -> tuple[str, str]:
+    async def _build_page(
+        self, user_id: str, payload: dict[str, Any], *, bw: bool | None = None
+    ) -> tuple[str, str]:
+        """按角色卡与分镜组装整页提示词；`bw` 留空时用设置页默认。"""
         name = str(payload.get("character", "")).strip()
         if not name:
             raise ValueError("请指定角色卡名")
@@ -252,7 +342,7 @@ class NaiDoujinPlugin(Star):
             characters=[character],
             explicit=bool(payload.get("explicit", self._config("default_explicit", False))),
             behavior_tags=str(payload.get("behavior_tags", self._config("default_behavior_tags", ""))),
-            bw=bool(self._config("bw_default", True)),
+            bw=bool(self._config("bw_default", True)) if bw is None else bool(bw),
             no_sex=bool(payload.get("no_sex", self._config("no_sex_default", False))),
         )
 
@@ -278,7 +368,7 @@ class NaiDoujinPlugin(Star):
             payload = json.loads(payload_text)
             if not isinstance(payload, dict):
                 raise ValueError("参数必须是 JSON 对象")
-            assembled, _ = await self._build_page(str(event.get_sender_id()), payload)
+            assembled, negative = await self._build_page(str(event.get_sender_id()), payload)
         except (json.JSONDecodeError, ValueError) as exc:
             yield event.plain_result(f"参数错误：{exc}")
             return
@@ -286,7 +376,7 @@ class NaiDoujinPlugin(Star):
             logger.warning("NAI page build failed: %s", exc)
             yield event.plain_result("分镜组装失败，请检查角色卡和分镜数据。")
             return
-        async for result in self._draw_prompt(event, assembled):
+        async for result in self._draw_prompt(event, assembled, negative):
             yield result
 
     @filter.command("nai layout")
@@ -335,6 +425,279 @@ class NaiDoujinPlugin(Star):
         except Exception as exc:
             logger.warning("NAI character operation failed: %s", exc)
             yield event.plain_result("角色卡操作失败。")
+
+    # ------------------------------------------------------------------
+    # 会话 LLM 工具：提示词由会话中的 LLM 细化，插件只管守卫、成本与队列
+    # ------------------------------------------------------------------
+
+    @_llm_tool()
+    async def NAI_Generate_Image(
+        self,
+        event: AstrMessageEvent,
+        prompt: str = "",
+        character: str = "",
+        size: str = "",
+        steps: int = 0,
+        style: str = "",
+        color: bool = False,
+        no_sex: bool = False,
+        extra_negative: str = "",
+    ):
+        """把细化好的 NovelAI 提示词画成 1 张图片并直接发给用户。
+
+        用户给中文需求时，**提示词组装由你完成**：先按下面的规范把需求细化成英文标签
+        提示词，再调用本工具；不要把中文原句直接传进来，也不要传【1】这类占位符
+        （插件不替换占位符，模型会把它们当文字画出来）。
+
+        写提示词规范（照 nai-doujin skill）：
+        - 开头一行标签，英文逗号分隔，顺序：分级 → 行为 → 角色 → 风格 → 质量。
+        - 只画成年人：角色描述必须写明成年特征（adult woman / mature 等）。插件会在负面里
+          强制加回 loli, child, aged down, petite, flat chest，写幼态词没有用。
+        - 露骨页开头写 nsfw, rating:explicit, 1boy, faceless male, hetero, adult, uncensored；
+          全年龄页写 rating:general。露骨页不要用 girl，写 woman。
+        - 黑白页写 monochrome, greyscale, comic, manga, screentone, halftone, lineart,
+          speech bubble, sound effects, emphasis lines, dramatic shadows, detailed background；
+          彩色页去掉 monochrome, greyscale, screentone, halftone，并把 color 设为 true。
+        - 质量词放末尾：very aesthetic, masterpiece, best quality, absurdres。
+        - 一页多格时按顺序写：标签行 → 一句英文版式句（几格、从右往左读、主格在哪）→
+          `Panel 1 (位置): ...` 逐格描述。每格只写这一格发生的事，不要把整页内容复制进每格。
+          四格位置依次是 top, main panel → bottom-right → bottom-middle → bottom-left。
+          需要严格合规的多格页时改用 NAI_Generate_Comic_Page。
+        - 中文台词画不出来：要对话框就写 `An empty white speech bubble with no text in it.`，
+          之后由人贴字；拟声写日文（ずぶっ 这类），呻吟写日文 + ♡。
+        - 角色外貌要么用 character 参数指定角色卡，要么把英文外貌标签直接写进 prompt。
+
+        Args:
+            prompt(string): 你细化好的英文提示词（标签行，或多格页的标签行 + 版式句 + Panel 描述）。
+            character(string): 可选。角色卡名；插件会把该卡的称呼与英文外貌追加到提示词末尾，
+                并把它容易被画错的部位加入负面。用 NAI_List_Characters 查询可用角色卡。
+            size(string): 可选。竖图 / 横图 / 方图 / 2K竖图 / 2K横图 / 2K方图 / 4K竖图 / 4K横图 / 4K方图。
+                留空用插件设置的默认尺寸。2K/4K 分别约 15/25 点，是普通图的 15–25 倍，用户没明确
+                要求高清时不要用。
+            steps(integer): 可选。1-50，留空或 0 用插件设置的默认步数。
+            style(string): 可选画风预设：fresh / comicDoujin / 2.5d / doujin / galgame / custom / none。
+                留空用插件默认画风；none 表示不传画师串。
+            color(boolean): 可选。true 表示这一张是彩色页（移除黑白守卫和 color 负面）。
+            no_sex(boolean): 可选。true 表示这一页不画插入（只用手或道具），会加入对应负面。
+            extra_negative(string): 可选。额外英文负面标签，逗号分隔，叠加在插件的成年守卫之后。
+        """
+        if not bool(self._config("enable_llm_tool", True)):
+            yield "生图工具已在插件设置里关闭（enable_llm_tool），请让用户到插件设置页开启后再试。"
+            return
+        text = normalize_tags(prompt)
+        if not text:
+            yield "生成失败：prompt 为空。请先按规范把用户需求细化成英文提示词，再调用本工具。"
+            return
+        choice = str(style or "").strip()
+        if choice and choice not in PRESET_CHOICES:
+            yield f"未知画风：{choice}；可选：{'、'.join(PRESET_CHOICES)}"
+            return
+        try:
+            size_value = resolve_size(size, str(self._config("default_size", "竖图")))
+            steps_value = resolve_steps(steps, self._config("default_steps", 28))
+        except DrawError as exc:
+            yield f"生成失败：{exc}"
+            return
+
+        user_id = str(event.get_sender_id())
+        character_negative = ""
+        card_name = str(character or "").strip()
+        if card_name:
+            card = await self._character_store().get(user_id, card_name)
+            if card is None:
+                names = await self._character_store().list(user_id)
+                yield f"未找到角色卡：{card_name}；可用角色卡：" + ("、".join(names) if names else "（暂无）")
+                return
+            text, character_negative = merge_character(text, card)
+        extra = ", ".join(part for part in (character_negative, normalize_tags(extra_negative)) if part)
+        flags = detect_conditionals(text)
+        negative = compose_negative(
+            extra,
+            bw=bool(self._config("bw_default", True)) and not bool(color),
+            no_sex=bool(no_sex),
+            bubble=flags["bubble"],
+            xray=flags["xray"],
+            section=flags["section"],
+        )
+
+        if str(self._config("image_mode", "direct")) == "prompt_only":
+            yield (
+                "当前插件设置为只出提示词（image_mode=prompt_only），未提交出图。"
+                "请把下面这段提示词原样发给用户：\n" + text
+            )
+            return
+        state = event.get_extra(DRAW_STATE_KEY) if hasattr(event, "get_extra") else None
+        if state in {"running", "finished"}:
+            yield "本轮消息已经执行过一次图片生成，请勿重复调用本工具；图片成功时已由本工具直接发送。"
+            return
+        if hasattr(event, "set_extra"):
+            event.set_extra(DRAW_STATE_KEY, "running")
+        try:
+            message, image_bytes = await self._generate_for_tool(
+                user_id,
+                prompt=text,
+                negative=negative,
+                size=size_value,
+                steps=steps_value,
+                style=choice,
+            )
+        finally:
+            if hasattr(event, "set_extra"):
+                event.set_extra(DRAW_STATE_KEY, "finished")
+        if image_bytes is None:
+            yield message
+            return
+        try:
+            await event.send(MessageChain(chain=[Image.fromBytes(image_bytes)]))
+        except Exception as exc:
+            logger.warning("NAI LLM tool send failed: %s", exc)
+            yield f"图片已生成，但发送失败：{str(exc)[:200]}"
+            return
+        yield message
+
+    @_llm_tool()
+    async def NAI_Generate_Comic_Page(
+        self,
+        event: AstrMessageEvent,
+        layout: str = "",
+        panels: str = "",
+        character: str = "",
+        size: str = "",
+        steps: int = 0,
+        style: str = "",
+        color: bool = False,
+        no_sex: bool = False,
+        explicit: bool = False,
+    ):
+        """按角色卡与分镜组装一整页漫画并出图（版式句、位置词与负面由插件按 skill 规则生成）。
+
+        你只负责把用户需求细化成**每格一句英文描述**；版式句、四格位置、空白气泡、
+        X 光/剖面负面和成年守卫由插件补齐。想让提示词完全自由发挥时用 NAI_Generate_Image。
+
+        Args:
+            layout(string): 必填。版式：四格 / 三格主格下 / 两格上下 / 两格斜线 / 五格 / 六格 / 整页大格。
+            panels(string): 必填。JSON 数组字符串，编号从 1 连续递增，例如
+                [{"no":1,"action":"the rabbit-eared woman looks toward the viewer","shot":"close-up",
+                  "sfx":"カランッ","moan":"んっ…","dialogue":true}]
+                action 必须是你细化过的英文画面描述；dialogue=true 表示这一格要一个空白气泡
+                （之后由人贴中文台词）。
+            character(string): 必填。角色卡名，用于取称呼与英文外貌；用 NAI_List_Characters 查询。
+            size(string): 可选。同 NAI_Generate_Image；留空用插件设置的默认尺寸。
+            steps(integer): 可选。1-50，留空或 0 用插件默认步数。
+            style(string): 可选画风预设：fresh / comicDoujin / 2.5d / doujin / galgame / custom / none。
+            color(boolean): 可选。true 画彩色页。
+            no_sex(boolean): 可选。true 表示这一页不画插入（只用手或道具）。
+            explicit(boolean): 可选。true 使用露骨标签（nsfw, rating:explicit, 1boy, faceless male）。
+        """
+        if not bool(self._config("enable_llm_tool", True)):
+            yield "生图工具已在插件设置里关闭（enable_llm_tool），请让用户到插件设置页开启后再试。"
+            return
+        layout = str(layout or "").strip()
+        if layout not in LAYOUTS:
+            yield f"未知版式：{layout or '(空)'}；可选：{'、'.join(LAYOUTS)}"
+            return
+        try:
+            parsed_panels = json.loads(panels) if str(panels or "").strip() else None
+        except json.JSONDecodeError as exc:
+            yield f"参数错误：panels 不是合法 JSON（{exc}）；请传 JSON 数组字符串。"
+            return
+        if not isinstance(parsed_panels, list) or not parsed_panels:
+            yield '参数错误：panels 必须是非空 JSON 数组，例如 [{"no":1,"action":"..."}]。'
+            return
+        choice = str(style or "").strip()
+        if choice and choice not in PRESET_CHOICES:
+            yield f"未知画风：{choice}；可选：{'、'.join(PRESET_CHOICES)}"
+            return
+        try:
+            size_value = resolve_size(size, str(self._config("default_size", "竖图")))
+            steps_value = resolve_steps(steps, self._config("default_steps", 28))
+        except DrawError as exc:
+            yield f"生成失败：{exc}"
+            return
+        user_id = str(event.get_sender_id())
+        try:
+            prompt, negative = await self._build_page(
+                user_id,
+                {
+                    "character": character,
+                    "layout": layout,
+                    "panels": parsed_panels,
+                    "explicit": bool(explicit),
+                    "no_sex": bool(no_sex),
+                },
+                bw=bool(self._config("bw_default", True)) and not bool(color),
+            )
+        except ValueError as exc:
+            yield f"参数错误：{exc}"
+            return
+        except Exception as exc:
+            logger.warning("NAI LLM page build failed: %s", exc)
+            yield "分镜组装失败，请检查角色卡和 panels 数据。"
+            return
+
+        if str(self._config("image_mode", "direct")) == "prompt_only":
+            yield (
+                "当前插件设置为只出提示词（image_mode=prompt_only），未提交出图。"
+                "请把下面这段提示词原样发给用户：\n" + prompt
+            )
+            return
+        state = event.get_extra(DRAW_STATE_KEY) if hasattr(event, "get_extra") else None
+        if state in {"running", "finished"}:
+            yield "本轮消息已经执行过一次图片生成，请勿重复调用本工具；图片成功时已由本工具直接发送。"
+            return
+        if hasattr(event, "set_extra"):
+            event.set_extra(DRAW_STATE_KEY, "running")
+        try:
+            message, image_bytes = await self._generate_for_tool(
+                user_id,
+                prompt=prompt,
+                negative=negative,
+                size=size_value,
+                steps=steps_value,
+                style=choice,
+            )
+        finally:
+            if hasattr(event, "set_extra"):
+                event.set_extra(DRAW_STATE_KEY, "finished")
+        if image_bytes is None:
+            yield message
+            return
+        try:
+            await event.send(MessageChain(chain=[Image.fromBytes(image_bytes)]))
+        except Exception as exc:
+            logger.warning("NAI LLM tool send failed: %s", exc)
+            yield f"图片已生成，但发送失败：{str(exc)[:200]}"
+            return
+        yield message
+
+    @_llm_tool()
+    async def NAI_List_Characters(self, event: AstrMessageEvent):
+        """列出当前可用的角色卡，供你挑选角色或核对英文外貌。
+
+        用户提到某个角色、或需要把角色外貌写进提示词时先调用本工具。
+        返回 JSON：characters（名称/称呼 ref/外貌 look/易错特征 uc/部件）、layouts（可用版式）、
+        presets（可用画风预设）。
+        """
+        user_id = str(event.get_sender_id())
+        store = self._character_store()
+        entries = []
+        for name in await store.list(user_id):
+            card = await store.get(user_id, name)
+            if card is None:
+                continue
+            entries.append(
+                {
+                    "name": name,
+                    "ref": str(card.get("ref", "")),
+                    "look": str(card.get("look", "")),
+                    "uc": str(card.get("uc", "")),
+                    "parts": card.get("parts", {}),
+                }
+            )
+        yield json.dumps(
+            {"characters": entries, "layouts": list(LAYOUTS), "presets": list(PRESET_CHOICES)},
+            ensure_ascii=False,
+        )
 
     async def terminate(self) -> None:
         if self._queue:

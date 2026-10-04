@@ -1,7 +1,7 @@
 name: astrbot_plugin_nai_cartoon
 display_name: NAI 同人漫画
-desc: NovelAI 同人漫画单页生成插件，按分镜版式组装提示词并调用第三方站点出图
-short_desc: 用 NovelAI 按分镜版式生成同人漫画单页
-version: v0.1.0
+desc: NovelAI 同人漫画单页生成插件，由会话中的 LLM 细化提示词并调用第三方站点出图
+short_desc: 提需求即可出图：会话 LLM 细化提示词，插件按分镜规则出同人漫画页
+version: v0.2.0
 author: elegy-snow
 repo: https://github.com/elegy-snow/astrbot_plugin_nai_cartoon

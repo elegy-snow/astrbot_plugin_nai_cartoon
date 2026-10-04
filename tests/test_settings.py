@@ -21,7 +21,7 @@ class SettingsSchemaTests(unittest.TestCase):
             "queue_timeout", "max_queue", "daily_quota", "default_model",
             "default_artist_preset", "custom_artist", "send_preview", "bw_default",
             "default_layout", "default_explicit", "default_behavior_tags", "no_sex_default",
-            "default_size", "default_steps", "quota_precheck",
+            "default_size", "default_steps", "quota_precheck", "enable_llm_tool",
         }
         self.assertTrue(expected.issubset(self.schema.keys()))
         self.assertNotIn("fallback_key", self.schema)
