@@ -16,7 +16,8 @@
     "type": "string",
     "default": "",
     "secret": true,
-    "hint": "为此插件安装配置个人密钥；也可继续使用 /nai key 命令绑定。"
+    "hint": "填写 nai.sta1n.cn 的个人站点密钥；也可继续使用 /nai key 命令绑定。",
+    "obvious": true
   },
   "queue_timeout": {
     "description": "单任务超时（秒）",
@@ -50,7 +51,7 @@
   },
   "custom_artist": {
     "description": "自定义画师串",
-    "type": "text",
+    "type": "string",
     "default": ""
   },
   "send_preview": {
@@ -79,7 +80,7 @@
   },
   "default_behavior_tags": {
     "description": "默认行为标签",
-    "type": "text",
+    "type": "string",
     "default": "",
     "hint": "/nai page 未提供 behavior_tags 时使用；每页请求仍可覆盖。"
   },
@@ -91,9 +92,9 @@
   },
   "character_cards": {
     "description": "角色卡库（JSON）",
-    "type": "text",
+    "type": "string",
     "default": "{}",
-    "hint": "按角色名填写对象，例如 {\"兔耳娘\":{\"ref\":\"the rabbit-eared woman\",\"look\":\"adult woman, rabbit ears, long hair\",\"uc\":\"fox ears\",\"parts\":{\"ears\":\"her rabbit ears\"}}}。可通过 /nai char 命令管理个人 KV 角色卡。"
+    "hint": "按角色名填写对象，例如 {\"兔耳娘\":{\"ref\":\"the rabbit-eared woman\",\"look\":\"adult woman, rabbit ears, long hair\",\"uc\":\"fox ears\",\"parts\":{\"ears\":\"her rabbit ears\"}}}。可通过 /nai char 命令管理角色卡。"
   },
   "default_size": {
     "description": "默认出图尺寸档位",

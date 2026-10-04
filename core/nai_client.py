@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
-import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -152,7 +150,7 @@ class NaiClient:
             await asyncio.sleep(poll_interval)
         raise NaiAPIError("任务等待超时")
 
-    async def download_image(self, token: str, image_url: str) -> str:
+    async def download_image(self, token: str, image_url: str) -> bytes:
         parsed = urllib.parse.urlsplit(image_url)
         if parsed.scheme or parsed.netloc:
             if parsed.scheme != "https" or parsed.hostname != urllib.parse.urlsplit(self.base_url).hostname:
@@ -165,24 +163,13 @@ class NaiClient:
         payload, _ = await self._request("GET", path, token=token, timeout=60)
         if not isinstance(payload, bytes) or not payload:
             raise NaiAPIError("图片下载失败")
-        suffix = ".png" if payload.startswith(b"\x89PNG\r\n\x1a\n") else ".jpg"
-        descriptor, filename = tempfile.mkstemp(prefix="nai-draw-", suffix=suffix)
-        try:
-            with os.fdopen(descriptor, "wb") as output:
-                output.write(payload)
-        except OSError:
-            try:
-                os.unlink(filename)
-            except OSError:
-                pass
-            raise NaiAPIError("无法保存生成图片") from None
-        return filename
+        return payload
 
-    async def generate(self, token: str, *, timeout: float = 300.0, **params: Any) -> tuple[dict[str, Any], str]:
+    async def generate(self, token: str, *, timeout: float = 300.0, **params: Any) -> tuple[dict[str, Any], bytes]:
         job = await self.submit_job(token, **params)
         finished = await self.poll_job(token, str(job["id"]), timeout=timeout)
         image_url = finished.get("imageUrl")
         if not image_url:
             raise NaiAPIError("任务完成但站点未返回图片地址")
-        filename = await self.download_image(token, str(image_url))
-        return finished, filename
+        image_bytes = await self.download_image(token, str(image_url))
+        return finished, image_bytes

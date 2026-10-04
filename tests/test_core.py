@@ -3,9 +3,11 @@ import json
 import unittest
 
 from core.character_store import CharacterStore, CharacterStoreError
+from core.nai_client import NaiAPIError, NaiClient
 from core.placeholders import PlaceholderError, replace_placeholders
 from core.pricing import cost_for_size
 from core.prompt_builder import NEG_BASE, NEG_BUBBLE, NEG_NO_SEX, base_negative, build_page_prompt
+from core.usage import UsageStore
 
 
 class PricingTests(unittest.TestCase):
@@ -174,6 +176,48 @@ class CharacterStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await store.delete("alice", "兔耳娘"))
         with self.assertRaises(CharacterStoreError):
             await store.put("alice", "未成年", {"ref": "person", "look": "long hair"})
+
+
+class UsageStoreTests(unittest.IsolatedAsyncioTestCase):
+    async def test_counts_are_per_user_and_per_day(self):
+        plugin = FakeKVPlugin()
+        store = UsageStore(plugin)
+        self.assertEqual(await store.count("alice"), 0)
+        await store.record("alice")
+        await store.record("alice")
+        self.assertEqual(await store.count("alice"), 2)
+        self.assertEqual(await store.count("bob"), 0)
+        self.assertEqual(await store.remaining("alice", 5), 3)
+        self.assertIsNone(await store.remaining("alice", 0))
+
+    async def test_corrupted_counter_falls_back_to_zero(self):
+        plugin = FakeKVPlugin()
+        store = UsageStore(plugin)
+        await plugin.put_kv_data(store._key("alice"), "not-a-number")
+        self.assertEqual(await store.count("alice"), 0)
+
+
+class ImageDownloadTests(unittest.IsolatedAsyncioTestCase):
+    class StubClient(NaiClient):
+        def __init__(self, payload, content_type="image/png"):
+            super().__init__("https://nai.sta1n.cn")
+            self.payload = payload
+            self.content_type = content_type
+
+        async def _request(self, method, path, **kwargs):
+            return self.payload, self.content_type
+
+    async def test_returns_raw_bytes_without_temp_files(self):
+        client = self.StubClient(b"\x89PNG\r\n\x1a\nbinary")
+        self.assertEqual(await client.download_image("token", "/api/images/abc/content"), b"\x89PNG\r\n\x1a\nbinary")
+        self.assertEqual(await client.download_image("token", "https://nai.sta1n.cn/api/images/abc/content"), b"\x89PNG\r\n\x1a\nbinary")
+
+    async def test_rejects_foreign_host(self):
+        client = self.StubClient(b"data")
+        with self.assertRaises(NaiAPIError):
+            await client.download_image("token", "https://evil.example.com/api/images/abc/content")
+        with self.assertRaises(NaiAPIError):
+            await client.download_image("token", "relative/path")
 
 
 if __name__ == "__main__":

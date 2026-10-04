@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 from typing import Any
 
 from astrbot.api import logger
@@ -15,19 +14,31 @@ from .core.nai_client import NaiClient
 from .core.pricing import cost_for_size
 from .core.prompt_builder import LAYOUTS, base_negative, build_page_prompt
 from .core.queue import DrawQueue, QueueFullError
+from .core.usage import UsageStore
 
 
 @register("astrbot_plugin_nai_cartoon", "elegy-snow", "NovelAI 同人漫画单页生成", "0.1.0")
 class NaiDoujinPlugin(Star):
-    def __init__(self, context: Context):
-        super().__init__(context)
+    def __init__(self, context: Context, config: Any = None):
+        if config is None:
+            super().__init__(context)
+        else:
+            super().__init__(context, config)
+        self._plugin_config: Any = config if config is not None else {}
         self._queue: DrawQueue | None = None
+        self._usage = UsageStore(self)
 
     def _config(self, key: str, default: Any) -> Any:
+        value = config_value(self._plugin_config, key, None)
+        if value is not None and value != "":
+            return value
         try:
-            return config_value(self.context.get_config(), key, default)
+            fallback = config_value(self.context.get_config(), key, None)
         except Exception:
-            return default
+            fallback = None
+        if fallback is not None and fallback != "":
+            return fallback
+        return default
 
     def _client(self) -> NaiClient:
         return NaiClient(str(self._config("station_base", "https://nai.sta1n.cn")))
@@ -41,6 +52,16 @@ class NaiDoujinPlugin(Star):
             maxsize=int(self._config("max_queue", 20)),
         )
         await self._queue.start()
+        logger.info(
+            "NAI 配置已加载：密钥=%s，角色卡=%d 张，模型=%s，尺寸=%s，步数=%s，每日上限=%s，站点=%s",
+            "已配置" if str(self._config("user_key", "") or "").strip() else "未配置",
+            len(self._character_store().configured_cards),
+            self._config("default_model", ""),
+            self._config("default_size", ""),
+            self._config("default_steps", ""),
+            self._config("daily_quota", 0),
+            self._client().base_url,
+        )
         try:
             settings = await self._client().settings()
             logger.info("NAI station settings loaded (costPerImage=%s)", settings.get("costPerImage", "unknown"))
@@ -102,18 +123,26 @@ class NaiDoujinPlugin(Star):
 
     @filter.command("nai quota")
     async def quota(self, event: AstrMessageEvent):
-        """查询站点额度。"""
-        token = await self._get_token(str(event.get_sender_id()))
+        """查询站点额度与今日出图用量。"""
+        user_id = str(event.get_sender_id())
+        token = await self._get_token(user_id)
         if not token:
-            yield event.plain_result("请先使用 /nai key <密钥> 绑定密钥。")
+            yield event.plain_result("请先在设置页填写密钥，或使用 /nai key <密钥> 绑定。")
             return
         try:
             account = await self._client().me(token)
             balance = account.get("balance", account.get("anlas", "未知"))
-            yield event.plain_result(f"当前余额：{balance} 点。")
         except Exception as exc:
             logger.warning("NAI quota lookup failed: %s", exc)
             yield event.plain_result("额度查询失败，请检查密钥和站点配置。")
+            return
+        lines = [f"当前余额：{balance} 点。"]
+        daily_limit = int(self._config("daily_quota", 0) or 0)
+        used = await self._usage.count(user_id)
+        lines.append(
+            f"今日已出图 {used} 张（上限 {daily_limit}）。" if daily_limit > 0 else f"今日已出图 {used} 张（未设上限）。"
+        )
+        yield event.plain_result("\n".join(lines))
 
     @filter.command("nai cost")
     async def cost(self, event: AstrMessageEvent):
@@ -133,13 +162,21 @@ class NaiDoujinPlugin(Star):
         if not prompt:
             yield event.plain_result("请提供提示词。")
             return
-        token = await self._get_token(str(event.get_sender_id()))
+        user_id = str(event.get_sender_id())
+        token = await self._get_token(user_id)
         if not token:
-            yield event.plain_result("请先使用 /nai key <密钥> 绑定密钥。")
+            yield event.plain_result("请先在设置页填写密钥，或使用 /nai key <密钥> 绑定。")
             return
         if str(self._config("image_mode", "direct")) == "prompt_only":
             yield event.plain_result(prompt)
             return
+
+        daily_limit = int(self._config("daily_quota", 0) or 0)
+        if daily_limit > 0:
+            used = await self._usage.count(user_id)
+            if used >= daily_limit:
+                yield event.plain_result(f"今日出图已达上限（{used}/{daily_limit}）。可调高设置页的「每用户每日出图上限」或明日再试。")
+                return
 
         size = str(self._config("default_size", "竖图"))
         model = str(self._config("default_model", "nai-diffusion-4-5-full"))
@@ -182,14 +219,11 @@ class NaiDoujinPlugin(Star):
         try:
             future = await self._queue.submit(operation)
             yield event.plain_result(f"任务已提交到本机队列，预计费用 {cost} 点。")
-            job, filename = await future
-            try:
-                yield event.chain_result([Image.fromFileSystem(filename)])
-            finally:
-                try:
-                    os.unlink(filename)
-                except OSError:
-                    pass
+            job, image_bytes = await future
+            await self._usage.record(user_id)
+            if bool(self._config("send_preview", False)):
+                yield event.plain_result(f"提示词：\n{prompt}")
+            yield event.chain_result([Image.fromBytes(image_bytes)])
         except QueueFullError:
             yield event.plain_result("排队已满，稍后再试。")
         except Exception as exc:
