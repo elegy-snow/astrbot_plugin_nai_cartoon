@@ -1,6 +1,9 @@
 import json
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+
+from core.config_utils import config_value
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,6 +33,20 @@ class SettingsSchemaTests(unittest.TestCase):
         self.assertEqual(self.schema["default_layout"]["default"], "四格")
         self.assertFalse(self.schema["default_explicit"]["default"])
         self.assertEqual(self.schema["default_behavior_tags"]["default"], "")
+
+
+class RuntimeSettingsReadTests(unittest.TestCase):
+    def test_reads_dict_and_nested_setting_value(self):
+        config = {"user_key": "secret", "foo": SimpleNamespace(value="bar")}
+        self.assertEqual(config_value(config, "user_key", ""), "secret")
+        self.assertEqual(config_value(config, "foo", ""), "bar")
+
+    def test_reads_mapping_and_attribute_config_objects(self):
+        class MappingConfig(dict):
+            pass
+
+        self.assertEqual(config_value(MappingConfig(user_key="secret"), "user_key", ""), "secret")
+        self.assertEqual(config_value(SimpleNamespace(user_key="secret"), "user_key", ""), "secret")
 
 
 if __name__ == "__main__":

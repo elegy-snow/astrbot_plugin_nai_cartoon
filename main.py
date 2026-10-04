@@ -10,6 +10,7 @@ from astrbot.api.message_components import Image
 from astrbot.api.star import Context, Star, register
 
 from .core.character_store import CharacterStore, CharacterStoreError
+from .core.config_utils import config_value
 from .core.nai_client import NaiClient
 from .core.pricing import cost_for_size
 from .core.prompt_builder import LAYOUTS, base_negative, build_page_prompt
@@ -24,7 +25,7 @@ class NaiDoujinPlugin(Star):
 
     def _config(self, key: str, default: Any) -> Any:
         try:
-            return self.context.get_config().get(key, default)
+            return config_value(self.context.get_config(), key, default)
         except Exception:
             return default
 
@@ -66,13 +67,16 @@ class NaiDoujinPlugin(Star):
         if not key:
             token = await self._get_token(user_id)
             if not token:
-                yield event.plain_result("尚未绑定密钥。请使用 /nai key <密钥>。")
+                yield event.plain_result("设置页和 /nai key 均未配置密钥。")
+                return
+            if str(self._config("user_key", "") or "").strip():
+                yield event.plain_result("设置页密钥已配置。使用 /nai quota 查询额度。")
                 return
             try:
                 account = await self._client().me(token)
             except Exception as exc:
                 logger.warning("NAI account lookup failed: %s", exc)
-                yield event.plain_result("查询失败，请检查密钥和站点配置。")
+                yield event.plain_result("KV 绑定密钥存在，但额度查询失败；请用 /nai quota 检查站点连接。")
                 return
             balance = account.get("balance", account.get("anlas", "未知"))
             yield event.plain_result(f"密钥已配置，当前余额：{balance} 点。")

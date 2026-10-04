@@ -1,4 +1,5 @@
 import asyncio
+import json
 import unittest
 
 from core.character_store import CharacterStore, CharacterStoreError
@@ -131,6 +132,14 @@ class FakeKVPlugin:
 
 
 class CharacterStoreTests(unittest.IsolatedAsyncioTestCase):
+    async def test_configured_card_accepts_single_object_and_list(self):
+        plugin = FakeKVPlugin()
+        card = {"ref": "configured woman", "look": "adult woman, long hair"}
+        single = CharacterStore(plugin, json.dumps({"name_zh": "Single", **card}))
+        listed = CharacterStore(plugin, json.dumps([{"name": "Listed", **card}]))
+        self.assertEqual((await single.get("user", "Single"))["ref"], "configured woman")
+        self.assertEqual((await listed.get("user", "Listed"))["ref"], "configured woman")
+
     async def test_settings_cards_are_available_and_kv_card_overrides(self):
         plugin = FakeKVPlugin()
         configured = {"Card": {"ref": "configured woman", "look": "adult woman, configured hair"}}

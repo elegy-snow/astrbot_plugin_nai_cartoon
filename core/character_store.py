@@ -58,7 +58,25 @@ class CharacterStore:
                 configured_cards = json.loads(configured_cards or "{}")
             except json.JSONDecodeError:
                 configured_cards = {}
-        self.configured_cards = configured_cards if isinstance(configured_cards, dict) else {}
+        self.configured_cards = self._normalize_configured_cards(configured_cards)
+
+    @staticmethod
+    def _normalize_configured_cards(raw: Any) -> dict[str, dict[str, Any]]:
+        if isinstance(raw, list):
+            entries = ((str(card.get("name_zh") or card.get("name") or ""), card) for card in raw if isinstance(card, dict))
+        elif isinstance(raw, dict) and ("ref" in raw or "look" in raw):
+            name = str(raw.get("name_zh") or raw.get("name") or "角色")
+            entries = ((name, raw),)
+        elif isinstance(raw, dict):
+            entries = raw.items()
+        else:
+            return {}
+        normalized: dict[str, dict[str, Any]] = {}
+        for name, card in entries:
+            name = str(name).strip()
+            if name and isinstance(card, dict):
+                normalized[name] = card
+        return normalized
 
     def _key(self, user_id: str) -> str:
         return f"{STORE_KEY_PREFIX}{user_id}"
@@ -80,12 +98,11 @@ class CharacterStore:
         await self.plugin.put_kv_data(self._key(user_id), json.dumps(cards, ensure_ascii=False))
 
     def _configured_card(self, name: str) -> dict[str, Any] | None:
-        card = self.configured_cards.get(name)
-        if card is None:
-            card = next((value for key, value in self.configured_cards.items() if str(key).casefold() == name.casefold()), None)
-        if not isinstance(card, dict):
+        matched_name = next((key for key in self.configured_cards if key.casefold() == name.casefold()), None)
+        if matched_name is None:
             return None
-        return _validate_card(name, card)
+        card = self.configured_cards[matched_name]
+        return _validate_card(matched_name, card)
 
     async def list(self, user_id: str) -> list[str]:
         names = set(await self._load(user_id))
