@@ -1,0 +1,87 @@
+{
+  "station_base": {
+    "description": "站点根地址",
+    "type": "string",
+    "default": "https://nai.sta1n.cn",
+    "hint": "自建站点改这里。"
+  },
+  "image_mode": {
+    "description": "出图方式",
+    "type": "string",
+    "default": "direct",
+    "options": ["direct", "prompt_only"]
+  },
+  "allow_user_key": {
+    "description": "允许用户绑定自己的密钥",
+    "type": "bool",
+    "default": true
+  },
+  "fallback_key": {
+    "description": "兜底密钥",
+    "type": "string",
+    "default": "",
+    "secret": true
+  },
+  "queue_timeout": {
+    "description": "单任务超时（秒）",
+    "type": "int",
+    "default": 300,
+    "slider": {"min": 60, "max": 900, "step": 30}
+  },
+  "max_queue": {
+    "description": "队列上限",
+    "type": "int",
+    "default": 20,
+    "slider": {"min": 1, "max": 100, "step": 1}
+  },
+  "daily_quota": {
+    "description": "每用户每日出图上限，0 表示不限制",
+    "type": "int",
+    "default": 30,
+    "slider": {"min": 0, "max": 500, "step": 10}
+  },
+  "default_model": {
+    "description": "默认模型",
+    "type": "string",
+    "default": "nai-diffusion-4-5-full",
+    "options": ["nai-diffusion-4-5-full", "nai-diffusion-5-full"]
+  },
+  "default_artist_preset": {
+    "description": "默认画风预设",
+    "type": "string",
+    "default": "doujin",
+    "options": ["fresh", "comicDoujin", "2.5d", "doujin", "galgame", "custom", "none"]
+  },
+  "custom_artist": {
+    "description": "自定义画师串",
+    "type": "text",
+    "default": ""
+  },
+  "send_preview": {
+    "description": "出图后是否附带提示词回执",
+    "type": "bool",
+    "default": false
+  },
+  "bw_default": {
+    "description": "默认黑白模式",
+    "type": "bool",
+    "default": true
+  },
+  "default_size": {
+    "description": "默认出图尺寸档位",
+    "type": "string",
+    "default": "竖图",
+    "options": ["竖图", "横图", "方图", "2K竖图", "2K横图", "2K方图", "4K竖图", "4K横图", "4K方图"]
+  },
+  "default_steps": {
+    "description": "默认步数",
+    "type": "int",
+    "default": 28,
+    "slider": {"min": 1, "max": 50, "step": 1}
+  },
+  "quota_precheck": {
+    "description": "提交前检查额度",
+    "type": "bool",
+    "default": true
+  }
+}
