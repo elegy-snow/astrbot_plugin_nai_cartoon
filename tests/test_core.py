@@ -4,7 +4,7 @@ import unittest
 from core.character_store import CharacterStore, CharacterStoreError
 from core.placeholders import PlaceholderError, replace_placeholders
 from core.pricing import cost_for_size
-from core.prompt_builder import NEG_BASE, NEG_BUBBLE, TAGS_STYLE, build_page_prompt
+from core.prompt_builder import NEG_BASE, NEG_BUBBLE, NEG_NO_SEX, base_negative, build_page_prompt
 
 
 class PricingTests(unittest.TestCase):
@@ -88,6 +88,35 @@ class PromptBuilderTests(unittest.TestCase):
     def test_layout_mismatch_fails(self):
         with self.assertRaises(ValueError):
             build_page_prompt(layout="四格", panels=[{"action": "one panel"}], characters=[self.character])
+
+    def test_bw_switch_changes_style_and_color_negative(self):
+        panels = [{"action": "adult woman standing"}]
+        prompt_bw, negative_bw = build_page_prompt(
+            layout="整页大格", panels=panels, characters=[self.character], bw=True
+        )
+        prompt_color, negative_color = build_page_prompt(
+            layout="整页大格", panels=panels, characters=[self.character], bw=False
+        )
+        self.assertNotEqual(prompt_bw, prompt_color)
+        self.assertIn("monochrome, greyscale", prompt_bw)
+        self.assertNotIn("monochrome, greyscale", prompt_color)
+        self.assertNotIn("black and white", prompt_color.casefold())
+        self.assertNotIn("black and white", prompt_bw.casefold())
+        self.assertIn("colorful", negative_bw)
+        self.assertNotIn("colorful", negative_color)
+        self.assertIn("bad anatomy", negative_color)
+        self.assertIn("loli, child, aged down", negative_color)
+        self.assertIn("bad anatomy", base_negative(False))
+        self.assertNotIn("colorful", base_negative(False))
+
+    def test_no_sex_negative_is_opt_in(self):
+        _, negative = build_page_prompt(
+            layout="整页大格",
+            panels=[{"action": "adult woman holding an object"}],
+            characters=[self.character],
+            no_sex=True,
+        )
+        self.assertIn(NEG_NO_SEX, negative)
 
 
 class FakeKVPlugin:

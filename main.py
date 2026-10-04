@@ -12,7 +12,7 @@ from astrbot.api.star import Context, Star, register
 from .core.character_store import CharacterStore, CharacterStoreError
 from .core.nai_client import NaiClient
 from .core.pricing import cost_for_size
-from .core.prompt_builder import LAYOUTS, build_page_prompt
+from .core.prompt_builder import LAYOUTS, base_negative, build_page_prompt
 from .core.queue import DrawQueue, QueueFullError
 
 
@@ -142,7 +142,8 @@ class NaiDoujinPlugin(Star):
         model = str(self._config("default_model", "nai-diffusion-4-5-full"))
         steps = int(self._config("default_steps", 28))
         artist = str(self._config("custom_artist", "") if self._config("default_artist_preset", "doujin") == "custom" else self._config("default_artist_preset", "doujin"))
-        negative = "loli, child, aged down, petite, flat chest" if bool(self._config("bw_default", True)) else ""
+        bw = bool(self._config("bw_default", True))
+        negative = base_negative(bw)
         try:
             cost = cost_for_size(size, model, steps)
         except ValueError as exc:
@@ -215,6 +216,7 @@ class NaiDoujinPlugin(Star):
             explicit=bool(payload.get("explicit", False)),
             behavior_tags=str(payload.get("behavior_tags", "")),
             bw=bool(self._config("bw_default", True)),
+            no_sex=bool(payload.get("no_sex", False)),
         )
 
     @filter.command("nai prompt")
