@@ -205,3 +205,42 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# ============================================================
+# AstrBot 插件项目 — 开发素材隔离规则
+# 目的：防止抓包/截图/临时文件被 git add . 误提交进公开仓库
+# 注意：resources/ 下的运行时资源（图标、模板、字体）不在排除范围内，需要正常提交
+# ============================================================
+
+# 开发参考素材（站点前端源码、抓包、竞品分析）——放仓库外 nai_assets/ 更好，
+# 若临时放在仓库内，这些规则会兜住它们
+.dev/
+_capture/
+_site/
+*.har
+*.har.gz
+
+# 抓包/调试临时文件（下划线前缀是常见的抓包落盘命名，如 _app.js、_hdr.txt）
+_hdr.txt
+_app.js
+_index.html
+_styles.css
+
+# 运行时生成物：插件运行产生的图片缓存/日志/数据库，不应进版本库
+data/
+cache/
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# 敏感信息：站点密钥、用户 token 绝不能提交（本插件密钥由用户自行填写）
+_conf_sensitive.json
+secrets.json
+*.key
+
+# 编辑器/系统杂物
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
